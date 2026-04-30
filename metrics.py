@@ -23,11 +23,9 @@ def get_tf_pn(ground_truth, image):
 
 # for calculating metrics from the TP, FP, TN, and FN values
 def metrics(tp, fp, tn, fn):
-    # 
     precision = tp / (tp + fp)
     recall = tp / (tp + fn)
 
-    # 
     f1 = 2*((precision*recall) / (precision + recall))
     pixel_accuracy = (tp + tn) / (tp+ fp + tn + fn)
 
@@ -38,17 +36,26 @@ def display_metrics(ground_truth, image):
     precision, recall, f1, pixel_accuracy = metrics(tp, fp, tn, fn)
 
     # display
-    print(f"Precision: {np.round(precision, 3)} \n Recall: {np.round(recall, 3)}\n F1 Score: {np.round(f1, 3)}\n Pixel Accuracy: {np.round(pixel_accuracy, 3)}")
+    print("----- Metrics -----")
+    print(f"Precision: {np.round(precision, 3)}\nRecall: {np.round(recall, 3)}\nF1 Score: {np.round(f1, 3)}\nPixel Accuracy: {np.round(pixel_accuracy, 3)}")
 
 
 def main():
     # temporary testing
-    ground = cv.imread("SUT Dataset/1-Segmentation/Ground Truth/1.png")
+    ground = cv.imread("SUT Dataset/1-Segmentation/Ground Truth/9.png")
     also_ground = ground
-    not_ground = cv.imread("SUT Dataset/1-Segmentation/Ground Truth/10.png")
+    not_ground = cv.imread("traditional_outputs/9_06_mask.png")
+
+    ground_2 = cv.imread("SUT Dataset/1-Segmentation/Ground Truth/2.png")
+    img2 = cv.imread("traditional_outputs/2_06_mask.png")
+
+    h, w, _ = img2.shape
+    print(h)
+    print(w)
 
     display_metrics(ground, also_ground)
     display_metrics(ground, not_ground)
+    display_metrics(ground_2, img2)
     
 
 

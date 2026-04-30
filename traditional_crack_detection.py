@@ -54,19 +54,29 @@ def detect_cracks_traditional(image: np.ndarray, sensitivity: float = 85.0):
         gray = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
 
     # Contrast enhancement
-    clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
+    clahe = cv2.createCLAHE(clipLimit=1, tileGridSize=(8, 8))
     enhanced = clahe.apply(gray)
 
     # Strong texture suppression (VERY IMPORTANT)
-    denoised = cv2.bilateralFilter(enhanced, d=9, sigmaColor=75, sigmaSpace=75)
+    denoised = cv2.GaussianBlur(enhanced, (5, 5), 0)
+    denoised = cv2.bilateralFilter(denoised, d=9, sigmaColor=75, sigmaSpace=75)
+
+    # correcting light non-uniformities
+    kernel=cv2.getStructuringElement(cv2.MORPH_RECT , (8, 8))
+    bg_noise=cv2.morphologyEx(denoised, cv2.MORPH_DILATE, kernel)
+    denoised=cv2.divide(denoised, bg_noise, scale=255)
 
     # Black-hat to extract dark cracks
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (25, 25))
+    k = max(15, int(min(h, w) * 0.03))
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (k, k))
     blackhat = cv2.morphologyEx(denoised, cv2.MORPH_BLACKHAT, kernel)
     blackhat = cv2.normalize(blackhat, None, 0, 255, cv2.NORM_MINMAX)
 
     threshold_value = np.percentile(blackhat, sensitivity)
     _, mask_blackhat = cv2.threshold(blackhat, threshold_value, 255, cv2.THRESH_BINARY)
+    # _, otsu = cv2.threshold(blackhat, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    # adjusted = otsu + 15
+    # _, mask_blackhat = cv2.threshold(blackhat, adjusted, 255, cv2.THRESH_BINARY)
 
     # Adaptive threshold
     adaptive = cv2.adaptiveThreshold(
@@ -74,30 +84,38 @@ def detect_cracks_traditional(image: np.ndarray, sensitivity: float = 85.0):
         255,
         cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
         cv2.THRESH_BINARY_INV,
-        41,
-        7
+        61,
+        3
     )
 
     # Edge detection
-    edges = cv2.Canny(denoised, 50, 140)
+    edges = cv2.Canny(enhanced, 100, 200)
 
     # Combine all signals
     mask = cv2.bitwise_or(mask_blackhat, adaptive)
     mask = cv2.bitwise_or(mask, edges)
 
     # Remove speckle noise
-    open_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    # changing from (3, 3) to (5, 5) causes a drastic improvement
+    open_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, open_kernel, iterations=2)
 
     # Connect crack segments
-    close_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+    close_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (10, 10))
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, close_kernel, iterations=1)
 
+    size = min(h, w) + 250 if h <=2000 or w <= 2000 else 5000
+
     # Remove tiny components (FINAL CLEANUP)
-    mask = remove_small_components(mask, min_area=300)
+    mask = remove_small_components(mask, min_area=size)
+
+    # add a line shaped kernel
+    line_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 9))
+    line_response = cv2.morphologyEx(mask, cv2.MORPH_BLACKHAT, line_kernel)
+    mask = cv2.bitwise_or(mask, line_response)
 
     # Slight dilation for training usability
-    dilate_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
+    dilate_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
     final_mask = cv2.dilate(mask, dilate_kernel, iterations=1)
 
     overlay = overlay_mask_on_image(original_image, final_mask)
