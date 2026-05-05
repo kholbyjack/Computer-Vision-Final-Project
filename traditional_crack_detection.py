@@ -3,6 +3,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+from PIL import Image
 
 
 def ensure_dir(path: Path) -> None:
@@ -48,8 +49,8 @@ def detect_cracks_traditional(image: np.ndarray, sensitivity: float = 85.0):
 
     # Upscale small images
     h, w = gray.shape
-    if w < 600:
-        scale = 600 / w
+    if w < 512:
+        scale = 512 / w
         original_image = cv2.resize(original_image, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
         gray = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
 
@@ -101,18 +102,18 @@ def detect_cracks_traditional(image: np.ndarray, sensitivity: float = 85.0):
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, open_kernel, iterations=2)
 
     # Connect crack segments
-    close_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (10, 10))
+    close_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (8, 8))
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, close_kernel, iterations=1)
 
-    size = min(h, w) + 250 if h <=2000 or w <= 2000 else 5000
+    size = min(h, w) if h <=2000 or w <= 2000 else 5000
 
     # Remove tiny components (FINAL CLEANUP)
     mask = remove_small_components(mask, min_area=size)
 
     # add a line shaped kernel
-    line_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 9))
-    line_response = cv2.morphologyEx(mask, cv2.MORPH_BLACKHAT, line_kernel)
-    mask = cv2.bitwise_or(mask, line_response)
+    # line_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 9))
+    # line_response = cv2.morphologyEx(mask, cv2.MORPH_BLACKHAT, line_kernel)
+    # mask = cv2.bitwise_or(mask, line_response)
 
     # Slight dilation for training usability
     dilate_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
@@ -132,23 +133,27 @@ def detect_cracks_traditional(image: np.ndarray, sensitivity: float = 85.0):
 
 
 def process_one_image(image_path: Path, output_dir: Path, sensitivity: float):
-    image = cv2.imread(str(image_path))
+    # image = cv2.imread(str(image_path))
+    image = Image.open(image_path).convert("RGB").resize((512, 512), Image.NEAREST)
+    image = np.array(image)
+
 
     if image is None:
         raise ValueError(f"Could not read image: {image_path}")
+    
 
     results = detect_cracks_traditional(image, sensitivity)
 
     stem = image_path.stem
     ensure_dir(output_dir)
 
-    cv2.imwrite(str(output_dir / f"{stem}_01_gray.png"), results["gray"])
-    cv2.imwrite(str(output_dir / f"{stem}_02_enhanced.png"), results["enhanced"])
-    cv2.imwrite(str(output_dir / f"{stem}_03_denoised.png"), results["denoised"])
-    cv2.imwrite(str(output_dir / f"{stem}_04_blackhat.png"), results["blackhat"])
-    cv2.imwrite(str(output_dir / f"{stem}_05_raw_mask.png"), results["raw_mask"])
-    cv2.imwrite(str(output_dir / f"{stem}_06_mask.png"), results["binary_mask"])
-    cv2.imwrite(str(output_dir / f"{stem}_07_overlay.png"), results["overlay"])
+    cv2.imwrite(str(output_dir / "steps" / f"{stem}_01_gray.png"), results["gray"])
+    cv2.imwrite(str(output_dir / "steps" / f"{stem}_02_enhanced.png"), results["enhanced"])
+    cv2.imwrite(str(output_dir / "steps" / f"{stem}_03_denoised.png"), results["denoised"])
+    cv2.imwrite(str(output_dir / "steps" / f"{stem}_04_blackhat.png"), results["blackhat"])
+    cv2.imwrite(str(output_dir / "steps" / f"{stem}_05_raw_mask.png"), results["raw_mask"])
+    cv2.imwrite(str(output_dir / "masks" / f"{stem}_06_mask.png"), results["binary_mask"])
+    cv2.imwrite(str(output_dir / "overlays" / f"{stem}_07_overlay.png"), results["overlay"])
 
     print(f"Processed: {image_path.name}")
 

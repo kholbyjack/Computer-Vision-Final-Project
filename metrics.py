@@ -1,5 +1,9 @@
 import cv2 as cv
 import numpy as np
+import os
+
+from PIL import Image
+
 
 # for finding the number of true/false positive and true/false negative pixels
 def get_tf_pn(ground_truth, image):
@@ -21,15 +25,17 @@ def get_tf_pn(ground_truth, image):
 
     return tp, fp, tn, fn
 
-# for calculating metrics from the TP, FP, TN, and FN values
-def metrics(tp, fp, tn, fn):
-    precision = tp / (tp + fp)
-    recall = tp / (tp + fn)
 
-    f1 = 2*((precision*recall) / (precision + recall))
-    pixel_accuracy = (tp + tn) / (tp+ fp + tn + fn)
+# for calculating metrics from the TP, FP, TN, and FN values
+def metrics(tp, fp, tn, fn):    
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0
+    recall = tp / (tp + fn) if (tp + fn) > 0 else 0
+
+    f1 = 2*((precision*recall) / (precision + recall)) if  (precision + recall) > 0 else 0
+    pixel_accuracy = (tp + tn) / (tp+ fp + tn + fn) if (tp+ fp + tn + fn) > 0 else 0
 
     return precision, recall, f1, pixel_accuracy
+
 
 def display_metrics(ground_truth, image):
     tp, fp, tn, fn = get_tf_pn(ground_truth=ground_truth, image=image)
@@ -39,25 +45,62 @@ def display_metrics(ground_truth, image):
     print("----- Metrics -----")
     print(f"Precision: {np.round(precision, 3)}\nRecall: {np.round(recall, 3)}\nF1 Score: {np.round(f1, 3)}\nPixel Accuracy: {np.round(pixel_accuracy, 3)}")
 
+    return precision, recall, f1, pixel_accuracy
+
+
+def analyze_images(folder_path, precision_list, recall_list, f1_list, accuracy_list, size = 512):
+    # 
+    for image in os.scandir(folder_path):
+        if image.is_file():
+            image_path = image.path
+            img = cv.imread(image_path)
+
+            # getting the name of the corresponding ground truth image from the image file path
+            split1 = image_path.split("\\")
+            image_number = split1[1].split("_")[0]
+            gtruth_name = image_number + ".png"
+            
+            mask = Image.open("SUT Dataset/1-Segmentation/Ground Truth/" + gtruth_name).convert("RGB").resize((size, size), Image.NEAREST)
+            gt = np.array(mask)
+
+            precision, recall, f1, pixel_accuracy = display_metrics(gt, img)
+            precision_list.append(precision) 
+            recall_list.append(recall)
+            f1_list.append(f1)
+            accuracy_list.append(pixel_accuracy)
+
 
 def main():
-    # temporary testing
-    ground = cv.imread("SUT Dataset/1-Segmentation/Ground Truth/9.png")
-    also_ground = ground
-    not_ground = cv.imread("traditional_outputs/9_06_mask.png")
+    # lists for storing the metrics for the images
+    trad_precision, trad_recall, trad_f1, trad_accuracy = ([] for i in range(4))
+    dl_precision, dl_recall, dl_f1, dl_accuracy = ([] for i in range(4))
 
-    ground_2 = cv.imread("SUT Dataset/1-Segmentation/Ground Truth/2.png")
-    img2 = cv.imread("traditional_outputs/2_06_mask.png")
-
-    h, w, _ = img2.shape
-    print(h)
-    print(w)
-
-    display_metrics(ground, also_ground)
-    display_metrics(ground, not_ground)
-    display_metrics(ground_2, img2)
+    metrics = {"traditional precision: " : trad_precision,
+               "traditional recall: " : trad_recall,
+               "traditional F1 score: ": trad_f1,
+               "traditional accuracy: ": trad_accuracy,
+               "deep learning precision: " : dl_precision,
+               "deep learning recall: " : dl_recall,
+               "deep learning F1 score: ": dl_f1,
+               "deep learning accuracy: ": dl_accuracy}
     
+    # folder paths for method results
+    trad_folder = "traditional_outputs/masks"
+    dl_folder= "unet_outputs/masks"
+
+    analyze_images(dl_folder, dl_precision, dl_recall, dl_f1, dl_accuracy)
+    analyze_images(trad_folder, trad_precision, trad_recall, trad_f1, trad_accuracy)
+
+    # display metrics
+    print("\n\\\\\\\\------ Average Metrics ------////\n")
+    for key, value in metrics.items():
+        if not value:
+            continue
+        print(f"Average {key}{round(sum(value) / len(value), 5)}")
+        print(f"Lowest {key}{round(min(value), 5)}")
+        print(f"Highest {key}{round(max(value), 5)}\n")
 
 
+    
 if __name__ == "__main__":
     main()
