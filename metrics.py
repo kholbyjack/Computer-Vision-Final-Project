@@ -1,6 +1,7 @@
 import cv2 as cv
 import numpy as np
 import os
+from matplotlib import pyplot as plt
 
 from PIL import Image
 
@@ -59,6 +60,7 @@ def analyze_images(folder_path, precision_list, recall_list, f1_list, accuracy_l
             split1 = image_path.split("\\")
             image_number = split1[1].split("_")[0]
             gtruth_name = image_number + ".png"
+            
             if size > 0:
                 mask = Image.open("SUT Dataset/1-Segmentation/Ground Truth/" + gtruth_name).convert("RGB").resize((size, size), Image.NEAREST)
                 gt = np.array(mask)
@@ -70,6 +72,50 @@ def analyze_images(folder_path, precision_list, recall_list, f1_list, accuracy_l
             recall_list.append(recall)
             f1_list.append(f1)
             accuracy_list.append(pixel_accuracy)
+
+
+def pie_chart(tp, fp, tn, fn):
+    labels = ["TP", "FP", "TN", "FN"]
+    pn = [tp, fp, tn, fn]
+
+    fig, ax = plt.subplots(figsize=(10, 7))
+    wedges, t = plt.pie(pn, labels=labels)
+
+    # legend
+    ax.legend(wedges, labels,
+          title="Metrics",
+          loc="center left",
+          bbox_to_anchor=(1, 0, 0.5, 1))
+
+    plt.show()
+
+
+
+def display_average_pn(folder_path, size = -1):
+    average_tp, average_fp, average_tn, average_fn = ([] for i in range(4))
+    for image in os.scandir(folder_path):
+        if image.is_file():
+            image_path = image.path
+            img = cv.imread(image_path)
+
+            # getting the name of the corresponding ground truth image from the image file path
+            split1 = image_path.split("\\")
+            image_number = split1[1].split("_")[0]
+            gtruth_name = image_number + ".png"
+            if size > 0:
+                mask = Image.open("SUT Dataset/1-Segmentation/Ground Truth/" + gtruth_name).convert("RGB").resize((size, size), Image.NEAREST)
+                gt = np.array(mask)
+            else:
+                gt = cv.imread("SUT Dataset/1-Segmentation/Ground Truth/" + gtruth_name)
+
+            tp, fp, tn, fn = get_tf_pn(ground_truth=gt, image=img)
+            average_tp.append(tp)
+            average_fp.append(fp)
+            average_tn.append(tn)
+            average_fn.append(fn)
+
+    # pie chart
+    pie_chart(sum(average_tp) / len(average_tp), sum(average_fp) / len(average_fp), sum(average_tn) / len(average_tn), sum(average_fn) / len(average_fn))
 
 
 def main():
@@ -90,8 +136,10 @@ def main():
     trad_folder = "traditional_outputs/masks"
     dl_folder= "unet_outputs/masks"
 
+    display_average_pn(dl_folder, size=512)
+
     analyze_images(dl_folder, dl_precision, dl_recall, dl_f1, dl_accuracy, size=512)
-    analyze_images(trad_folder, trad_precision, trad_recall, trad_f1, trad_accuracy)
+    analyze_images(trad_folder, trad_precision, trad_recall, trad_f1, trad_accuracy, size=-1)
 
     # display metrics
     print("\n\\\\\\\\------ Average Metrics ------////\n")
