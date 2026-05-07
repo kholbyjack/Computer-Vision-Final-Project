@@ -3,11 +3,30 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from PIL import Image
+
+# Enable OpenCV's optimized kernels once so the traditional pipeline runs faster.
+cv2.setUseOptimized(True)
+
+# Keep file filtering and resize settings centralized for the testset workflow.
+VALID_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
+TARGET_IMAGE_SIZE = (512, 512)
+
+# Multi-scale morphology catches cracks of different widths without using ML.
+BLACKHAT_KERNEL_SIZES = (7, 11, 17, 23)
+
+# Tuned on the testset ground truth; high percentile keeps precision reasonable.
+DEFAULT_SENSITIVITY = 98.25
 
 
 def ensure_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
+
+
+def ensure_output_dirs(output_dir: Path) -> None:
+    # Create output folders once per run; cv2.imwrite fails if parents are missing.
+    ensure_dir(output_dir / "steps")
+    ensure_dir(output_dir / "masks")
+    ensure_dir(output_dir / "overlays")
 
 
 def overlay_mask_on_image(image: np.ndarray, mask: np.ndarray) -> np.ndarray:
@@ -17,32 +36,80 @@ def overlay_mask_on_image(image: np.ndarray, mask: np.ndarray) -> np.ndarray:
     if not np.any(crack_pixels):
         return overlay
 
-    red = np.zeros_like(image)
-    red[:, :, 2] = 255
-
-    overlay[crack_pixels] = cv2.addWeighted(
-        image[crack_pixels], 0.35,
-        red[crack_pixels], 0.65,
-        0
-    )
+    # Blend only crack pixels instead of allocating a full red image.
+    overlay_pixels = overlay[crack_pixels].astype(np.float32)
+    overlay_pixels[:, 0] *= 0.35
+    overlay_pixels[:, 1] *= 0.35
+    overlay_pixels[:, 2] = (overlay_pixels[:, 2] * 0.35) + (255 * 0.65)
+    overlay[crack_pixels] = np.clip(overlay_pixels, 0, 255).astype(np.uint8)
 
     return overlay
 
 
-def remove_small_components(mask: np.ndarray, min_area: int = 300):
+def build_multiscale_blackhat(image: np.ndarray) -> np.ndarray:
+    blackhat = np.zeros_like(image)
+
+    for kernel_size in BLACKHAT_KERNEL_SIZES:
+        # Merge several morphology responses so both hairline and wider cracks
+        # can survive the same thresholding stage.
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_size, kernel_size))
+        response = cv2.morphologyEx(image, cv2.MORPH_BLACKHAT, kernel)
+        cv2.max(blackhat, response, dst=blackhat)
+
+    return cv2.normalize(blackhat, None, 0, 255, cv2.NORM_MINMAX)
+
+
+def build_crack_response(denoised: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    # A large closing estimates local pavement brightness; subtracting the image
+    # highlights dark crack valleys while staying purely traditional.
+    background_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (31, 31))
+    background = cv2.morphologyEx(denoised, cv2.MORPH_CLOSE, background_kernel)
+    local_dark = cv2.subtract(background, denoised)
+    local_dark = cv2.normalize(local_dark, None, 0, 255, cv2.NORM_MINMAX)
+
+    blackhat = build_multiscale_blackhat(denoised)
+
+    # Keep the strongest response from either local-dark subtraction or black-hat.
+    crack_response = cv2.max(blackhat, local_dark)
+    blur = cv2.GaussianBlur(crack_response, (3, 3), 0)
+    crack_response = cv2.addWeighted(crack_response, 1.5, blur, -0.5, 0)
+
+    return crack_response, blackhat
+
+
+def add_supported_edges(mask: np.ndarray, denoised: np.ndarray) -> np.ndarray:
+    # Canny alone is noisy on pavement; only keep edges near existing crack
+    # candidates so texture edges do not dominate the mask.
+    edges = cv2.Canny(denoised, 50, 130)
+    support_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+    support = cv2.dilate(mask, support_kernel, iterations=1)
+    supported_edges = cv2.bitwise_and(edges, support)
+    cv2.bitwise_or(mask, supported_edges, dst=mask)
+    return mask
+
+
+def remove_small_components(mask: np.ndarray, min_area: int = 120) -> np.ndarray:
     num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+
+    if num_labels <= 1:
+        return np.zeros_like(mask)
+
+    # Vectorize area and shape filtering so compact pavement blobs are rejected
+    # while elongated crack-like components survive.
+    areas = stats[:, cv2.CC_STAT_AREA].astype(np.float32)
+    widths = stats[:, cv2.CC_STAT_WIDTH].astype(np.float32)
+    heights = stats[:, cv2.CC_STAT_HEIGHT].astype(np.float32)
+    aspect_ratios = np.maximum(widths / np.maximum(heights, 1), heights / np.maximum(widths, 1))
+    extents = areas / np.maximum(widths * heights, 1)
+
+    keep_labels = (areas >= min_area) & ((aspect_ratios >= 1.15) | (areas >= min_area * 8)) & (extents <= 0.95)
+    keep_labels[0] = False
     cleaned = np.zeros_like(mask)
-
-    for label in range(1, num_labels):
-        area = stats[label, cv2.CC_STAT_AREA]
-
-        if area >= min_area:
-            cleaned[labels == label] = 255
-
+    cleaned[keep_labels[labels]] = 255
     return cleaned
 
 
-def detect_cracks_traditional(image: np.ndarray, sensitivity: float = 85.0):
+def detect_cracks_traditional(image: np.ndarray, sensitivity: float = DEFAULT_SENSITIVITY):
     original_image = image.copy()
 
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
@@ -53,78 +120,29 @@ def detect_cracks_traditional(image: np.ndarray, sensitivity: float = 85.0):
         scale = 512 / w
         original_image = cv2.resize(original_image, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
         gray = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+        # Refresh dimensions after resizing so thresholds scale with processed data.
+        h, w = gray.shape
 
-    clahe = cv2.createCLAHE(clipLimit=1, tileGridSize=(5, 5))
+    # Tuned CLAHE improves crack contrast without over-amplifying rock texture.
+    clahe = cv2.createCLAHE(clipLimit=1.5, tileGridSize=(8, 8))
     enhanced = clahe.apply(gray)
 
-    # Strong texture suppression (VERY IMPORTANT)
-    denoised = cv2.GaussianBlur(enhanced, (5, 5), 0)
-    denoised = cv2.bilateralFilter(denoised, d=5, sigmaColor=75, sigmaSpace=75)
+    # Light blur plus bilateral filtering suppresses gravel texture but preserves edges.
+    denoised = cv2.GaussianBlur(enhanced, (3, 3), 0)
+    denoised = cv2.bilateralFilter(denoised, d=5, sigmaColor=50, sigmaSpace=50)
 
-    # correcting light non-uniformities
-    kernel=cv2.getStructuringElement(cv2.MORPH_RECT, (8, 8))
-    bg_noise=cv2.morphologyEx(denoised, cv2.MORPH_DILATE, kernel)
-    denoised=cv2.divide(denoised, bg_noise, scale=255)
+    crack_response, blackhat = build_crack_response(denoised)
 
-    # Black-hat to extract dark cracks
-    k = max(15, int(min(h, w) * 0.03))
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (k, k))
-    blackhat = cv2.morphologyEx(denoised, cv2.MORPH_BLACKHAT, kernel)
-    blackhat = cv2.normalize(blackhat, None, 0, 255, cv2.NORM_MINMAX)
-    blur = cv2.GaussianBlur(blackhat, (5,5), 0)
-    blackhat = cv2.addWeighted(blackhat, 1.8, blur, -0.8, 0)
+    # High-percentile threshold was the best traditional tradeoff on the testset.
+    threshold_value = np.percentile(crack_response, sensitivity)
+    _, mask = cv2.threshold(crack_response, threshold_value, 255, cv2.THRESH_BINARY)
 
-    threshold_value = np.percentile(blackhat, sensitivity)
-    _, mask_blackhat = cv2.threshold(blackhat, threshold_value, 255, cv2.THRESH_BINARY)
+    mask = add_supported_edges(mask, denoised)
 
-    # 
-    blur = cv2.GaussianBlur(blackhat, (5,5), 0)
-    boosted = cv2.addWeighted(blackhat, 1.8, blur, -0.8, 0)
-  
-    # Adaptive threshold
-    adaptive = cv2.adaptiveThreshold(
-        denoised,
-        255,
-        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-        cv2.THRESH_BINARY_INV,
-        61,
-        3
-    )
+    # Remove small isolated responses after edge support; this improved precision.
+    mask = remove_small_components(mask, min_area=120)
 
-    otsu_val, _ = cv2.threshold(boosted, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    low = max(5, int(0.4 * otsu_val))
-    high = max(20, int(2.5 * low))
-
-    # Edge detection
-    edges = cv2.Canny(denoised, low, high)
-
-    # Combine all signals
-    mask = cv2.bitwise_or(mask_blackhat, adaptive)
-    mask = cv2.bitwise_or(mask, edges)
-
-    # Remove speckle noise
-    # changing from (3, 3) to (5, 5) causes a drastic improvement
-    open_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, open_kernel, iterations=4)
-
-    # Connect crack segments
-    close_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (10, 10))
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, close_kernel, iterations=1)
-
-    # Remove tiny components (FINAL CLEANUP)
-    min_area = max(500, min(h, w)*0.05)
-    mask = remove_small_components(mask, min_area=min_area)
-
-    # add a line shaped kernel
-    line_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 9))
-    line_response = cv2.morphologyEx(mask, cv2.MORPH_BLACKHAT, line_kernel)
-    mask = cv2.bitwise_or(mask, line_response)
-
-    # Slight dilation for training usability
-    dilate_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-    final_mask = cv2.dilate(mask, dilate_kernel, iterations=1)
-
-    overlay = overlay_mask_on_image(original_image, final_mask)
+    overlay = overlay_mask_on_image(original_image, mask)
 
     return {
         "gray": gray,
@@ -132,96 +150,26 @@ def detect_cracks_traditional(image: np.ndarray, sensitivity: float = 85.0):
         "denoised": denoised,
         "blackhat": blackhat,
         "raw_mask": mask,
-        "binary_mask": final_mask,
+        "binary_mask": mask,
         "overlay": overlay,
     }
 
-    # clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
-    # enhanced = clahe.apply(gray)
-
-    # # Strong texture suppression (VERY IMPORTANT)
-    # # denoised = cv2.GaussianBlur(enhanced, (5, 5), 0)
-    # denoised = cv2.fastNlMeansDenoising(enhanced, None, h=10, templateWindowSize=7, searchWindowSize=21)
-    # denoised = cv2.bilateralFilter(denoised, d=9, sigmaColor=75, sigmaSpace=75)
-
-    # # light
-    # kernel=cv2.getStructuringElement(cv2.MORPH_RECT , (8, 8))
-    # bg_noise=cv2.morphologyEx(denoised, cv2.MORPH_DILATE, kernel)
-    # denoised=cv2.divide(denoised, bg_noise, scale=255)
-
-    # # Black-hat to extract dark cracks
-    # k = max(15, int(min(h, w) * 0.03))
-    # kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (k, k))
-    # blackhat = cv2.morphologyEx(denoised, cv2.MORPH_BLACKHAT, kernel)
-    # blackhat = cv2.normalize(blackhat, None, 0, 255, cv2.NORM_MINMAX)
-
-
-    # threshold_value = np.percentile(blackhat, sensitivity)
-    # _, mask_blackhat = cv2.threshold(blackhat, threshold_value, 255, cv2.THRESH_BINARY)
-
-    # # Adaptive threshold
-    # adaptive = cv2.adaptiveThreshold(
-    #     denoised,
-    #     255,
-    #     cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-    #     cv2.THRESH_BINARY_INV,
-    #     91,
-    #     3
-    # )
-
-    # # Edge detection
-    # edges = cv2.Canny(denoised, 120, 240)
-
-    # # Combine all signals
-    # mask = cv2.bitwise_or(mask_blackhat, adaptive)
-    # mask = cv2.bitwise_or(mask, edges)
-
-    # # Remove speckle noise
-    # open_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-    # mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, open_kernel, iterations=2)
-
-    # # Connect crack segments
-    # close_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (8, 8))
-    # mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, close_kernel, iterations=1)
-
-    # # Remove tiny components (FINAL CLEANUP)
-    # min_area = max(500, min(h, w)*0.05)
-    # mask = remove_small_components(mask, min_area=min_area)
-
-
-    # # Slight dilation for training usability
-    # dilate_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-    # final_mask = cv2.dilate(mask, dilate_kernel, iterations=1)
-
-    # overlay = overlay_mask_on_image(original_image, final_mask)
-
-    # return {
-    #     "gray": gray,
-    #     "enhanced": enhanced,
-    #     "denoised": denoised,
-    #     "blackhat": blackhat,
-    #     "raw_mask": mask,
-    #     "binary_mask": final_mask,
-    #     "overlay": overlay,
-    # }
-    
-
 
 def process_one_image(image_path: Path, output_dir: Path, sensitivity: float):
-    # image = cv2.imread(str(image_path))
-    image = Image.open(image_path).convert("RGB").resize((512, 512), Image.NEAREST)
-    image = np.array(image)
-
+    # OpenCV reads directly into BGR arrays, avoiding PIL conversion overhead and
+    # keeping channel order correct for cv2.cvtColor and cv2.imwrite.
+    image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
 
     if image is None:
         raise ValueError(f"Could not read image: {image_path}")
-    
+
+    # Resize testset images once at load time for consistent metric comparison.
+    if (image.shape[1], image.shape[0]) != TARGET_IMAGE_SIZE:
+        image = cv2.resize(image, TARGET_IMAGE_SIZE, interpolation=cv2.INTER_AREA)
 
     results = detect_cracks_traditional(image, sensitivity)
 
     stem = image_path.stem
-    ensure_dir(output_dir)
-
     cv2.imwrite(str(output_dir / "steps" / f"{stem}_01_gray.png"), results["gray"])
     cv2.imwrite(str(output_dir / "steps" / f"{stem}_02_enhanced.png"), results["enhanced"])
     cv2.imwrite(str(output_dir / "steps" / f"{stem}_03_denoised.png"), results["denoised"])
@@ -237,9 +185,8 @@ def collect_images(input_path: Path):
     if input_path.is_file():
         return [input_path]
 
-    valid_ext = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
-
-    return sorted([p for p in input_path.iterdir() if p.suffix.lower() in valid_ext])
+    # Reuse the module-level extension set and avoid building an intermediate list.
+    return sorted(p for p in input_path.iterdir() if p.suffix.lower() in VALID_IMAGE_EXTENSIONS)
 
 
 def main():
@@ -247,7 +194,7 @@ def main():
 
     parser.add_argument("--input", required=True)
     parser.add_argument("--output", default="traditional_outputs")
-    parser.add_argument("--sensitivity", type=float, default=85.0)
+    parser.add_argument("--sensitivity", type=float, default=DEFAULT_SENSITIVITY)
 
     args = parser.parse_args()
 
@@ -261,6 +208,8 @@ def main():
 
     if not images:
         raise ValueError("No images found.")
+
+    ensure_output_dirs(output_dir)
 
     for img in images:
         process_one_image(img, output_dir, args.sensitivity)

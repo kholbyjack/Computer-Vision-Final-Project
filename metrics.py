@@ -1,6 +1,7 @@
 import cv2 as cv
 import numpy as np
 import os
+from pathlib import Path
 
 from PIL import Image
 
@@ -50,17 +51,18 @@ def display_metrics(ground_truth, image):
 
 def analyze_images(folder_path, precision_list, recall_list, f1_list, accuracy_list, size = 512):
     # 
-    for image in os.scandir(folder_path):
+    for image in sorted(os.scandir(folder_path), key=lambda entry: entry.name):
         if image.is_file():
             image_path = image.path
-            img = cv.imread(image_path)
+            # Read predicted masks as grayscale so they match the resized ground truth.
+            img = cv.imread(image_path, cv.IMREAD_GRAYSCALE)
 
-            # getting the name of the corresponding ground truth image from the image file path
-            split1 = image_path.split("\\")
-            image_number = split1[1].split("_")[0]
+            # Path.stem works on macOS/Linux/Windows paths; splitting on "\\" broke
+            # on this branch when running metrics.py on macOS.
+            image_number = Path(image_path).stem.split("_")[0]
             gtruth_name = image_number + ".png"
             
-            mask = Image.open("SUT Dataset/1-Segmentation/Ground Truth/" + gtruth_name).convert("RGB").resize((size, size), Image.NEAREST)
+            mask = Image.open("SUT Dataset/1-Segmentation/Ground Truth/" + gtruth_name).convert("L").resize((size, size), Image.NEAREST)
             gt = np.array(mask)
 
             precision, recall, f1, pixel_accuracy = display_metrics(gt, img)
