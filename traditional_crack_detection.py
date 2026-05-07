@@ -102,18 +102,18 @@ def detect_cracks_traditional(image: np.ndarray, sensitivity: float = 85.0):
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, open_kernel, iterations=2)
 
     # Connect crack segments
-    close_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (8, 8))
+    close_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (10, 10))
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, close_kernel, iterations=1)
 
-    size = min(h, w) if h <=2000 or w <= 2000 else 5000
+    size = min(h, w) + 250 if h <=2000 or w <= 2000 else 5000
 
     # Remove tiny components (FINAL CLEANUP)
     mask = remove_small_components(mask, min_area=size)
 
     # add a line shaped kernel
-    # line_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 9))
-    # line_response = cv2.morphologyEx(mask, cv2.MORPH_BLACKHAT, line_kernel)
-    # mask = cv2.bitwise_or(mask, line_response)
+    line_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 9))
+    line_response = cv2.morphologyEx(mask, cv2.MORPH_BLACKHAT, line_kernel)
+    mask = cv2.bitwise_or(mask, line_response)
 
     # Slight dilation for training usability
     dilate_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
@@ -131,11 +131,10 @@ def detect_cracks_traditional(image: np.ndarray, sensitivity: float = 85.0):
         "overlay": overlay,
     }
 
-
 def process_one_image(image_path: Path, output_dir: Path, sensitivity: float):
-    # image = cv2.imread(str(image_path))
-    image = Image.open(image_path).convert("RGB").resize((512, 512), Image.NEAREST)
-    image = np.array(image)
+    image = cv2.imread(str(image_path))
+    # image = Image.open(image_path).convert("RGB").resize((512, 512), Image.NEAREST)
+    # image = np.array(image)
 
 
     if image is None:

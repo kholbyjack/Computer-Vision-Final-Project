@@ -48,7 +48,7 @@ def display_metrics(ground_truth, image):
     return precision, recall, f1, pixel_accuracy
 
 
-def analyze_images(folder_path, precision_list, recall_list, f1_list, accuracy_list, size = 512):
+def analyze_images(folder_path, precision_list, recall_list, f1_list, accuracy_list, size = -1):
     # 
     for image in os.scandir(folder_path):
         if image.is_file():
@@ -59,9 +59,11 @@ def analyze_images(folder_path, precision_list, recall_list, f1_list, accuracy_l
             split1 = image_path.split("\\")
             image_number = split1[1].split("_")[0]
             gtruth_name = image_number + ".png"
-            
-            mask = Image.open("SUT Dataset/1-Segmentation/Ground Truth/" + gtruth_name).convert("RGB").resize((size, size), Image.NEAREST)
-            gt = np.array(mask)
+            if size > 0:
+                mask = Image.open("SUT Dataset/1-Segmentation/Ground Truth/" + gtruth_name).convert("RGB").resize((size, size), Image.NEAREST)
+                gt = np.array(mask)
+            else:
+                gt = cv.imread("SUT Dataset/1-Segmentation/Ground Truth/" + gtruth_name)
 
             precision, recall, f1, pixel_accuracy = display_metrics(gt, img)
             precision_list.append(precision) 
@@ -88,7 +90,7 @@ def main():
     trad_folder = "traditional_outputs/masks"
     dl_folder= "unet_outputs/masks"
 
-    analyze_images(dl_folder, dl_precision, dl_recall, dl_f1, dl_accuracy)
+    analyze_images(dl_folder, dl_precision, dl_recall, dl_f1, dl_accuracy, size=512)
     analyze_images(trad_folder, trad_precision, trad_recall, trad_f1, trad_accuracy)
 
     # display metrics
